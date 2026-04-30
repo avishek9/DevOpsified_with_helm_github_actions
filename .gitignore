@@ -2,10 +2,7 @@ org-management/
 **/.terraform/*
 *.tfstate
 *.tfstate.backup
-*.tfvars
 .terraform.lock.hcl
-lab-gke/environments/prod/.terraform
-lab1-vpc/environmentsdev/.terraform
 data.txt
 lab-gke.tar.gz
 lab1-vpc.tar.gz
