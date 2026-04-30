@@ -1,0 +1,80 @@
+name: Terraform Plan and Apply
+
+on:
+  push:
+    branches:
+      - master        # triggers on direct push to master
+  pull_request:
+    branches:
+      - master        # triggers on PR targeting master
+
+# required for Workload Identity Federation
+permissions:
+  contents: read
+  id-token: write    # ← this is what allows GitHub to mint an OIDC token
+                     #   without this, WIF auth fails silently
+
+jobs:
+  terraform:
+    name: "Terraform - ${{ matrix.module }}"
+    runs-on: ubuntu-latest
+
+    # run one job per module, in parallel
+    strategy:
+      matrix:
+        module:
+          - lab-gke/environments/prod
+          - lab1-vpc/environments/dev
+          - lab3-shared-vpc/environments/lab/host
+          - lab3-shared-vpc/environments/lab/projects
+          - lab3-shared-vpc/environments/lab/service-a
+          - lab3-shared-vpc/environments/lab/service-b
+      fail-fast: false   # if one module fails, others keep running
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}  # all steps run from module dir
+
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v4
+
+      - name: authenticate to GCP via Workload Identity Federation
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        # this step exchanges the GitHub OIDC token for a GCP access token
+        # no JSON key file involved — WIF handles it
+
+      - name: setup terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"   # pin this to match your local version
+                                        # check yours with: terraform version
+
+      - name: terraform init
+        run: terraform init
+        # reads backend config from the module's backend.tf
+        # downloads providers fresh (no .terraform/ folder in repo)
+
+      - name: terraform fmt check
+        run: terraform fmt -check -recursive
+        # fails if any .tf file isn't formatted
+        # run 'terraform fmt' locally to fix before pushing
+
+      - name: terraform validate
+        run: terraform validate
+        # checks syntax and internal consistency
+
+      - name: terraform plan
+        run: terraform plan -out=tfplan
+        # always runs — on both PRs and pushes to master
+        # -out saves the plan so apply uses exactly what was planned
+
+      - name: terraform apply
+        # ONLY runs on push to master, not on PRs
+        # on PRs you want to see the plan but not apply it
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        run: terraform apply -auto-approve tfplan
