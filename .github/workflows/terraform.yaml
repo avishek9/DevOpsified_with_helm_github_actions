@@ -10,7 +10,7 @@ on:
       - 'lab-gke/**'
       - 'lab3-shared-vpc/**'
       - 'project-factory/**'
-      - '.github/workflows/terraform.yaml'  # retrigger if workflow itself changes
+      - '.github/workflows/terraform.yaml'
   pull_request:
     branches:
       - master
@@ -21,24 +21,16 @@ on:
       - 'project-factory/**'
       - '.github/workflows/terraform.yaml'
 
-# prevent multiple workflow runs from running concurrently
-# scenario: developer pushes twice quickly — second run waits for first
-# without this: two plans run simultaneously, both acquire lock, one fails
 concurrency:
   group: terraform-${{ github.ref }}
-  cancel-in-progress: false  # false = wait, not cancel
-                              # true would cancel the first run mid-apply — dangerous
+  cancel-in-progress: false
 
 permissions:
   contents: read
-  id-token: write       # required for Workload Identity Federation
-  pull-requests: write  # required to post plan output as PR comment
+  id-token: write
+  pull-requests: write
 
 jobs:
-  # ============================================================
-  # JOB 1: detect which modules have changed
-  # outputs a JSON array consumed by the matrix in Job 2
-  # ============================================================
   detect-changes:
     name: Detect Changed Modules
     runs-on: ubuntu-latest
@@ -50,16 +42,11 @@ jobs:
       - name: checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2  # need at least 2 commits to diff HEAD~1 vs HEAD
-                          # default fetch-depth is 1 (shallow clone)
-                          # without this git diff HEAD~1 fails
+          fetch-depth: 2
 
       - name: detect changed modules
         id: changed
         run: |
-          # on push: diff against previous commit
-          # on pull_request: diff against the base branch (merge target)
-          # this ensures PRs show all changes vs master, not just last commit
           if [ "${{ github.event_name }}" == "pull_request" ]; then
             BASE=${{ github.event.pull_request.base.sha }}
             HEAD=${{ github.event.pull_request.head.sha }}
@@ -71,9 +58,6 @@ jobs:
           echo "changed files:"
           echo "$CHANGED_FILES"
 
-          # map folder prefixes to their terraform module paths
-          # each entry is "trigger_prefix:module_path"
-          # one prefix can map to multiple modules (lab3-shared-vpc has 4)
           declare -A MODULE_MAP
           MODULE_MAP["lab1-vpc/"]="lab1-vpc/environments/dev"
           MODULE_MAP["lab-gke/"]="lab-gke/environments/prod"
@@ -82,12 +66,10 @@ jobs:
           MODULE_MAP["lab3-shared-vpc/environments/lab/service-a/"]="lab3-shared-vpc/environments/lab/service-a"
           MODULE_MAP["lab3-shared-vpc/environments/lab/service-b/"]="lab3-shared-vpc/environments/lab/service-b"
 
-          # build list of modules that need to run
           MODULES=()
           for PREFIX in "${!MODULE_MAP[@]}"; do
             if echo "$CHANGED_FILES" | grep -q "^$PREFIX"; then
               MODULE="${MODULE_MAP[$PREFIX]}"
-              # avoid duplicates — lab3-shared-vpc changes could match multiple
               if [[ ! " ${MODULES[@]} " =~ " ${MODULE} " ]]; then
                 MODULES+=("$MODULE")
                 echo "queuing module: $MODULE"
@@ -95,7 +77,6 @@ jobs:
             fi
           done
 
-          # handle edge case: no modules detected
           if [ ${#MODULES[@]} -eq 0 ]; then
             echo "no terraform modules changed"
             echo "modules=[]" >> $GITHUB_OUTPUT
@@ -103,33 +84,21 @@ jobs:
             exit 0
           fi
 
-          # convert bash array to JSON array for GitHub Actions matrix
-          # jq -R reads raw strings, jq -s -c compacts into one line
           JSON=$(printf '%s\n' "${MODULES[@]}" | jq -R . | jq -s -c .)
           echo "modules=$JSON" >> $GITHUB_OUTPUT
           echo "has-changes=true" >> $GITHUB_OUTPUT
           echo "final module matrix: $JSON"
 
-  # ============================================================
-  # JOB 2: terraform plan and apply
-  # only runs if Job 1 detected changes
-  # matrix is dynamically built from Job 1's output
-  # ============================================================
   terraform:
     name: "Terraform - ${{ matrix.module }}"
     runs-on: ubuntu-latest
     needs: detect-changes
-
-    # skip entire job if no modules changed
-    # without this: job would fail trying to run an empty matrix
     if: needs.detect-changes.outputs.has-changes == 'true'
 
     strategy:
       matrix:
         module: ${{ fromJson(needs.detect-changes.outputs.modules) }}
-      fail-fast: false  # if lab1-vpc fails, lab-gke still runs independently
-                        # true would cancel all matrix jobs on first failure
-                        # dangerous for infra — partial applies are hard to recover
+      fail-fast: false
 
     defaults:
       run:
@@ -139,9 +108,6 @@ jobs:
       - name: checkout code
         uses: actions/checkout@v4
 
-      # WIF auth — exchanges GitHub OIDC token for short-lived GCP token
-      # no JSON key file, no long-lived credentials
-      # token is scoped to this repo only (attribute-condition we set in gcloud)
       - name: authenticate to GCP
         id: auth
         uses: google-github-actions/auth@v2
@@ -153,44 +119,26 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.0"
-          terraform_wrapper: true  # wraps terraform binary to capture output
-                                   # required for posting plan to PR comments
+          terraform_wrapper: true
 
       - name: terraform init
         id: init
         run: terraform init
-        # reads backend.tf in the module directory
-        # downloads providers from registry (no .terraform/ in repo)
-        # authenticates to GCS backend using WIF token from auth step
 
       - name: terraform fmt check
         id: fmt
         run: terraform fmt -check -recursive
-        continue-on-error: true  # don't fail the pipeline — report it instead
-                                 # fmt issues are style, not correctness
-                                 # the PR comment step below will surface it
+        continue-on-error: true
 
       - name: terraform validate
         id: validate
         run: terraform validate
-        # checks syntax and provider schema correctness
-        # does NOT make any GCP API calls — fast and cheap
 
       - name: terraform plan
         id: plan
         run: terraform plan -out=tfplan -detailed-exitcode
-        # -out=tfplan: saves plan so apply uses exactly what was reviewed
-        #              prevents TOCTOU race: plan says X, apply does Y
-        # -detailed-exitcode:
-        #   exit 0 = no changes
-        #   exit 1 = error
-        #   exit 2 = changes present
-        # we use this in the apply condition below
-        continue-on-error: true  # allow next step to post comment even on failure
+        continue-on-error: true
 
-      # post plan output as a PR comment so reviewers see exactly what
-      # will change in GCP before approving the merge
-      # only runs on pull requests — not on direct pushes to master
       - name: post plan to PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
@@ -203,8 +151,6 @@ jobs:
               issue_number: context.issue.number,
             });
 
-            // delete previous plan comment for this module if it exists
-            // prevents the PR from filling up with stale plan outputs
             const botComment = comments.find(comment =>
               comment.user.type === 'Bot' &&
               comment.body.includes('${{ matrix.module }}')
@@ -217,16 +163,23 @@ jobs:
               });
             }
 
-            const planOutcome = '${{ steps.plan.outcome }}';
             const fmtOutcome = '${{ steps.fmt.outcome }}';
+            const initOutcome = '${{ steps.init.outcome }}';
+            const validateOutcome = '${{ steps.validate.outcome }}';
+            const planOutcome = '${{ steps.plan.outcome }}';
+
+            const fmtResult = fmtOutcome === 'success' ? 'pass' : 'needs formatting';
+            const initResult = initOutcome === 'success' ? 'pass' : 'fail';
+            const validateResult = validateOutcome === 'success' ? 'pass' : 'fail';
+            const planResult = planOutcome === 'success' ? 'pass' : 'fail';
 
             const output = `### Terraform Plan: \`${{ matrix.module }}\`
             | Step | Result |
             |------|--------|
-            | Format | ${fmtOutcome === 'success' ? '✅' : '⚠️ needs formatting'} |
-            | Init | ${{ steps.init.outcome === 'success' && '✅' || '❌' }} |
-            | Validate | ${{ steps.validate.outcome === 'success' && '✅' || '❌' }} |
-            | Plan | ${planOutcome === 'success' ? '✅' : '❌'} |
+            | Format | ${fmtResult} |
+            | Init | ${initResult} |
+            | Validate | ${validateResult} |
+            | Plan | ${planResult} |
 
             <details>
             <summary>Show Plan Output</summary>
@@ -245,23 +198,14 @@ jobs:
               body: output,
             });
 
-      # fail the job NOW if plan errored — after posting the PR comment
-      # so the reviewer sees the error in the PR, not just in the Actions log
       - name: check plan status
         if: steps.plan.outcome == 'failure'
         run: exit 1
 
       - name: terraform apply
-        # three conditions must ALL be true:
-        # 1. push to master (not a PR)
-        # 2. plan succeeded
-        # 3. plan detected actual changes (exit code 2)
-        #    exit code 0 = no changes = skip apply, nothing to do
         if: |
           github.ref == 'refs/heads/master' &&
           github.event_name == 'push' &&
           steps.plan.outcome == 'success' &&
           steps.plan.outputs.exitcode == '2'
         run: terraform apply -auto-approve tfplan
-        # uses the saved tfplan — guarantees apply executes exactly
-        # what was planned, not a fresh plan that could differ
