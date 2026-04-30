@@ -1,0 +1,40 @@
+# registry/projects/team-payments.yaml
+#
+# Payments team — migrating from on-prem datacenter to GCP.
+# connect_to_onprem: true during migration window.
+# Remove that flag and re-apply once cutover is complete.
+
+project:
+  id: acme-payments-prod
+  name: "Payments — Production"
+  environment: prod
+  team: payments
+  cost_center: "CC-1001"
+
+networking:
+  subnet_cidr: "10.50.0.0/20"
+  pods_cidr: "10.150.0.0/18"
+  services_cidr: "10.250.0.0/22"
+  connect_to_onprem: true    # NCC spoke — active during migration
+  shared_vpc: true
+
+iam:
+  owners:
+    - user:alice@acme.com
+  editors:
+    - group:payments-engineers@acme.com
+  viewers:
+    - group:security-audit@acme.com
+    - serviceAccount:soc-reader@acme-security.iam.gserviceaccount.com
+
+gke:
+  enabled: true
+  node_pool_size: medium
+  release_channel: REGULAR
+
+budget:
+  monthly_limit_usd: 8000
+  alert_thresholds: [50, 80, 100]
+  alert_emails:
+    - payments-leads@acme.com
+    - finops@acme.com

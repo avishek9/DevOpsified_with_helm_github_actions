@@ -1,0 +1,40 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "my-service.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "my-service.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "my-service.selectorLabels" . | nindent 6 }}
+      {{- /*
+        This policy applies to pods selected by these labels.
+        Same selector as Deployment and PDB — from _helpers.tpl.
+      */}}
+
+  policyTypes:
+    - Ingress
+    - Egress
+    {{- /*
+      Declaring both Ingress and Egress here means:
+        - Only explicitly allowed ingress is permitted
+        - Only explicitly allowed egress is permitted
+      If you only declare Ingress, egress is unrestricted.
+      Always declare both for defence in depth.
+    */}}
+
+  # ── Ingress rules ──────────────────────────────────────────────────────────
+  {{- with .Values.networkPolicy.ingress }}
+  ingress:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  # ── Egress rules ───────────────────────────────────────────────────────────
+  {{- with .Values.networkPolicy.egress }}
+  egress:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

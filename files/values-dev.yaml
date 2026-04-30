@@ -1,0 +1,33 @@
+# values-dev.yaml
+# Dev overrides — cheaper, more permissive topology, no HPA.
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+  limits:
+    cpu: "200m"
+    memory: "128Mi"
+
+autoscaling:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: false
+  # PDB with 1 replica would block all node drains entirely.
+  # Disable in dev — you accept brief unavailability.
+
+serviceAccount:
+  annotations:
+    iam.gke.io/gcp-service-account: "my-service-dev@your-project.iam.gserviceaccount.com"
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    # ScheduleAnyway in dev — dev clusters may have fewer nodes
+    # than replicas, DoNotSchedule would leave pods Pending.
+    labelSelector:
+      matchLabels: {}

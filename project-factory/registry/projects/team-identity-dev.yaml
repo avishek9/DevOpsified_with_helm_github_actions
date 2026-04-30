@@ -1,0 +1,37 @@
+# registry/projects/team-identity-dev.yaml
+#
+# Identity team — dev environment.
+# Smaller budget, no on-prem connectivity needed for dev.
+# Prod entry lives in team-identity-prod.yaml with different CIDRs.
+
+project:
+  id: acme-identity-dev
+  name: "Identity — Dev"
+  environment: dev
+  team: identity
+  cost_center: "CC-1003"
+
+networking:
+  subnet_cidr: "10.70.0.0/20"
+  pods_cidr: "10.170.0.0/18"
+  services_cidr: "10.270.0.0/22"
+  connect_to_onprem: false
+  shared_vpc: true
+
+iam:
+  owners:
+    - group:identity-leads@acme.com
+  editors:
+    - group:identity-engineers@acme.com
+  viewers: []
+
+gke:
+  enabled: true
+  node_pool_size: small
+  release_channel: RAPID   # dev uses RAPID for early feature access
+
+budget:
+  monthly_limit_usd: 500
+  alert_thresholds: [80, 100]
+  alert_emails:
+    - identity-leads@acme.com

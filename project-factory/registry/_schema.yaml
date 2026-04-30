@@ -1,0 +1,48 @@
+# registry/_schema.yaml
+# Defines the valid structure for registry/projects/*.yaml entries.
+# The validate_registry.py script checks every entry against this schema
+# in CI before terraform plan runs.
+# Teams copy this as a template when creating new entries.
+
+# Required fields — entry is rejected if any are missing
+required:
+  - project
+  - networking
+  - iam
+  - budget
+
+project:
+  required: [id, name, environment, team, cost_center]
+  id:
+    type: string
+    pattern: "^[a-z][a-z0-9-]{4,28}[a-z0-9]$"  # GCP project ID rules
+    max_length: 30
+    immutable: true   # changing this destroys and recreates the project
+  environment:
+    enum: [dev, staging, prod]
+  cost_center:
+    pattern: "^CC-[0-9]{4}$"
+
+networking:
+  required: [subnet_cidr]
+  connect_to_onprem:
+    type: boolean
+    default: false
+    note: "Creates NCC spoke — use during migration, remove post-cutover"
+  shared_vpc:
+    type: boolean
+    default: true
+
+gke:
+  enabled:
+    type: boolean
+    default: false
+  node_pool_size:
+    enum: [small, medium, large, gpu]
+    default: small
+
+budget:
+  required: [monthly_limit_usd, alert_emails]
+  monthly_limit_usd:
+    type: integer
+    min: 100

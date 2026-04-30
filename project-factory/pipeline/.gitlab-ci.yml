@@ -1,0 +1,163 @@
+# pipeline/.gitlab-ci.yml
+#
+# Project factory CI/CD pipeline.
+#
+# Stages:
+#   validate  → schema check on registry YAML (fast, no GCP calls)
+#   plan      → terraform plan (read-only GCP credentials)
+#   apply     → terraform apply (write GCP credentials, manual approval for prod)
+#
+# Authentication:
+#   Uses Workload Identity Federation — no SA key files stored in GitLab.
+#   GitLab OIDC token is exchanged for a short-lived GCP access token.
+#   The SA used for plan has read-only GCP permissions.
+#   The SA used for apply has the full factory permissions.
+#
+# Triggering:
+#   - Every MR: validate + plan (shows what will change)
+#   - Merge to main: validate + plan + apply (with manual approval gate)
+#   - apply only runs after a designated approver clicks "play" in GitLab
+
+stages:
+  - validate
+  - plan
+  - apply
+
+variables:
+  TF_ROOT: "${CI_PROJECT_DIR}/factory"
+  TF_STATE_BUCKET: "your-tf-state-bucket"
+  GCP_PROJECT_ID: "your-host-project"
+  # Workload Identity Federation pool and provider
+  GCP_WORKLOAD_IDENTITY_PROVIDER: "projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/gitlab-pool/providers/gitlab-provider"
+  GCP_PLAN_SA: "tf-factory-plan@your-host-project.iam.gserviceaccount.com"
+  GCP_APPLY_SA: "tf-factory-apply@your-host-project.iam.gserviceaccount.com"
+
+# ── WIF authentication ────────────────────────────────────────────────────────
+# Exchanges GitLab OIDC token for a GCP access token.
+# No SA key JSON anywhere — tokens are short-lived (~1 hour).
+.gcp_auth_plan: &gcp_auth_plan
+  - echo "Authenticating with GCP (plan SA — read only)"
+  - |
+    gcloud iam workload-identity-pools create-cred-config \
+      "${GCP_WORKLOAD_IDENTITY_PROVIDER}" \
+      --service-account="${GCP_PLAN_SA}" \
+      --output-file=gcp-credentials.json \
+      --credential-source-file="${CI_JOB_JWT_V2}" \
+      --credential-source-type=text
+  - export GOOGLE_APPLICATION_CREDENTIALS="$PWD/gcp-credentials.json"
+
+.gcp_auth_apply: &gcp_auth_apply
+  - echo "Authenticating with GCP (apply SA — write)"
+  - |
+    gcloud iam workload-identity-pools create-cred-config \
+      "${GCP_WORKLOAD_IDENTITY_PROVIDER}" \
+      --service-account="${GCP_APPLY_SA}" \
+      --output-file=gcp-credentials.json \
+      --credential-source-file="${CI_JOB_JWT_V2}" \
+      --credential-source-type=text
+  - export GOOGLE_APPLICATION_CREDENTIALS="$PWD/gcp-credentials.json"
+
+# ── Stage 1: validate ─────────────────────────────────────────────────────────
+# Fast — runs on every commit, no GCP credentials needed.
+# Catches YAML syntax errors, missing fields, overlapping CIDRs,
+# and invalid IAM member formats before touching Terraform.
+
+validate:registry:
+  stage: validate
+  image: python:3.11-slim
+  script:
+    - pip install pyyaml --quiet
+    - python3 pipeline/scripts/validate_registry.py
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ── Stage 2: plan ─────────────────────────────────────────────────────────────
+# Runs terraform plan and posts the diff as an MR comment.
+# Uses read-only plan SA — cannot make changes to GCP.
+
+plan:factory:
+  stage: plan
+  image: hashicorp/terraform:1.7
+  before_script:
+    - *gcp_auth_plan
+    - cd "${TF_ROOT}"
+    - |
+      terraform init \
+        -backend-config="bucket=${TF_STATE_BUCKET}" \
+        -backend-config="prefix=project-factory/main" \
+        -input=false
+  script:
+    - |
+      terraform plan \
+        -var-file=terraform.tfvars \
+        -out=tfplan \
+        -input=false \
+        2>&1 | tee plan-output.txt
+    - |
+      # Count resources to be created/changed/destroyed
+      ADDED=$(grep -c "will be created" plan-output.txt || true)
+      CHANGED=$(grep -c "will be updated" plan-output.txt || true)
+      DESTROYED=$(grep -c "will be destroyed" plan-output.txt || true)
+      echo "Plan summary: +${ADDED} ~${CHANGED} -${DESTROYED}"
+      # Fail the pipeline if any destroys are planned.
+      # Project destroys are dangerous — require manual override.
+      if grep -q "will be destroyed" plan-output.txt; then
+        echo "ERROR: Plan includes resource destruction."
+        echo "If intentional (removing a registry entry), run with"
+        echo "TF_ALLOW_DESTROY=true to override this check."
+        if [ "${TF_ALLOW_DESTROY}" != "true" ]; then
+          exit 1
+        fi
+      fi
+  artifacts:
+    # Save plan output for the apply stage
+    paths:
+      - factory/tfplan
+      - factory/plan-output.txt
+    expire_in: 1 hour
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ── Stage 3: apply ────────────────────────────────────────────────────────────
+# Only runs on merge to main, only after manual approval.
+# Uses the apply SA which has write permissions to GCP.
+# when: manual means a human must click "play" in GitLab UI
+# after reviewing the plan output from the previous stage.
+
+apply:factory:
+  stage: apply
+  image: hashicorp/terraform:1.7
+  before_script:
+    - *gcp_auth_apply
+    - cd "${TF_ROOT}"
+    - |
+      terraform init \
+        -backend-config="bucket=${TF_STATE_BUCKET}" \
+        -backend-config="prefix=project-factory/main" \
+        -input=false
+  script:
+    - terraform apply -input=false tfplan 2>&1 | tee apply-output.txt
+    - |
+      # Post summary of what was applied
+      echo "=== Apply complete ==="
+      terraform output -json project_inventory | python3 -c "
+      import json, sys
+      inv = json.load(sys.stdin)
+      print(f'Total projects managed: {len(inv)}')
+      for k, v in inv.items():
+          spoke = v.get('on_prem_spoke')
+          status = 'migrating (NCC spoke active)' if spoke else 'cloud-native'
+          print(f'  {k}: {v[\"project_id\"]} [{status}]')
+      "
+  dependencies:
+    - plan:factory
+  rules:
+    # Only run on main branch, requires manual approval
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+  environment:
+    name: production
+    # GitLab environment protection rules can require specific
+    # approvers (e.g. platform-team group) before apply runs

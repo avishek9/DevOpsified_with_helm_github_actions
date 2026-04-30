@@ -1,0 +1,144 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "my-service.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "my-service.labels" . | nindent 4 }}
+spec:
+  {{- /*
+    replicaCount is only set here when HPA is disabled.
+    When HPA is enabled, HPA manages replica count — if Terraform or Helm
+    also sets it, they fight each other on every apply.
+    This pattern prevents that conflict.
+  */}}
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+
+  selector:
+    matchLabels:
+      {{- include "my-service.selectorLabels" . | nindent 6 }}
+      {{- /*
+        IMMUTABLE: selector.matchLabels cannot change after first deploy.
+        Changing these labels requires deleting the Deployment first.
+        Never add dynamic values (release revision, image tag) here.
+      */}}
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxUnavailable: 0 — never take pods down before new ones are ready.
+      # Ensures zero downtime during deploys at the cost of temporarily
+      # running more pods than the replica count.
+      maxUnavailable: 0
+      # maxSurge: 1 — create one extra pod at a time during rolling update.
+      # Higher values speed up deploys but increase node resource pressure.
+      maxSurge: 1
+
+  template:
+    metadata:
+      labels:
+        {{- include "my-service.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- /*
+          checksum/config forces pod restart when a referenced ConfigMap
+          or Secret changes. Without this, pods keep running with stale
+          config even after the ConfigMap is updated.
+          Add one checksum per ConfigMap/Secret your pods mount or read.
+        */}}
+        checksum/values: {{ .Values | toYaml | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "my-service.serviceAccountName" . }}
+
+      # ── Security context ─────────────────────────────────────────────────
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+
+      # ── Termination ──────────────────────────────────────────────────────
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+
+      # ── Topology spread ──────────────────────────────────────────────────
+      {{- if .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- include "my-service.topologySpreadConstraints" . | nindent 8 }}
+      {{- end }}
+
+      # ── Node scheduling ──────────────────────────────────────────────────
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      # ── Volumes ──────────────────────────────────────────────────────────
+      {{- with .Values.volumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      # ── Containers ───────────────────────────────────────────────────────
+      containers:
+        - name: {{ .Chart.Name }}
+          image: {{ include "my-service.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+
+          # ── Lifecycle ─────────────────────────────────────────────────
+          {{- with .Values.lifecycle }}
+          lifecycle:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+          # ── Health checks ─────────────────────────────────────────────
+          # startupProbe must pass before liveness probe activates.
+          # Prevents liveness from killing a slow-starting pod.
+          startupProbe:
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+
+          # ── Resources ─────────────────────────────────────────────────
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+          # ── Environment ───────────────────────────────────────────────
+          {{- with .Values.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+          # ── Volume mounts ─────────────────────────────────────────────
+          {{- with .Values.volumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}

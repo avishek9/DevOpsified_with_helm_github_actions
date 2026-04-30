@@ -1,0 +1,35 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "my-service.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "my-service.labels" . | nindent 4 }}
+spec:
+  {{- /*
+    Only one of minAvailable or maxUnavailable can be set.
+    values.yaml defaults to minAvailable. To use maxUnavailable instead,
+    set podDisruptionBudget.minAvailable to null and uncomment maxUnavailable.
+
+    minAvailable and maxUnavailable both accept integers or percentage strings.
+    Integer: "2" means at least 2 pods must be available.
+    Percent: "50%" means at least 50% of pods must be available.
+    Percentage is safer with HPA — it scales with replica count automatically.
+  */}}
+  {{- if .Values.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- end }}
+  {{- if .Values.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "my-service.selectorLabels" . | nindent 6 }}
+      {{- /*
+        Must match the pod selector exactly.
+        From _helpers.tpl — same as Deployment selector.
+        If this drifts from the Deployment selector, the PDB silently
+        matches no pods and provides no protection during node drains.
+      */}}
+{{- end }}

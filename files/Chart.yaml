@@ -1,0 +1,21 @@
+apiVersion: v2
+name: my-service
+description: >
+  Production Helm chart for a stateless microservice.
+  Includes Deployment with topology spread, HPA, PDB,
+  ServiceAccount with Workload Identity, and NetworkPolicy.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+
+# Minimum Helm version required.
+# v3.2.0+ required for topologySpreadConstraints support in templates.
+kubeVersion: ">=1.24.0-0"
+
+keywords:
+  - microservice
+  - stateless
+
+maintainers:
+  - name: platform-team
+    email: platform@acme.com

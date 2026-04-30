@@ -1,0 +1,350 @@
+# values.yaml
+#
+# Defaults that work safely out of the box.
+# Override per environment in values-staging.yaml / values-prod.yaml.
+# Never put environment-specific values here.
+#
+# Principle: every field has a safe default. Production values.yaml
+# should override toward hardening, not toward functionality.
+
+# ── Image ─────────────────────────────────────────────────────────────────────
+
+image:
+  repository: us-central1-docker.pkg.dev/my-project/my-repo/my-service
+  # tag: always overridden at deploy time via --set image.tag=sha-xxxxxxx
+  # Never hardcode here — the chart version and image tag are independent.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# ── Replicas ──────────────────────────────────────────────────────────────────
+
+replicaCount: 2
+# Minimum 2 for HA — even in dev. One replica means any node drain
+# causes downtime. HPA will scale above this when enabled.
+
+# ── Service ───────────────────────────────────────────────────────────────────
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+  # targetPort: the port your container actually listens on.
+  # port: the port the Service exposes to other pods in the cluster.
+  annotations: {}
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+
+resources:
+  requests:
+    # requests: what Kubernetes guarantees the pod.
+    # HPA and Cluster Autoscaler both use requests for scheduling decisions.
+    # Set to p50 of actual usage — not too low (causes eviction under load)
+    # and not too high (wastes node capacity and inflates CA node sizing).
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    # limits: hard ceiling. Exceeding memory limit = OOMKill.
+    # Exceeding CPU limit = throttling (not kill).
+    # Set memory limit = request for Guaranteed QoS on critical services.
+    # Set memory limit > request for Burstable QoS on less critical services.
+    cpu: "500m"
+    memory: "256Mi"
+
+# ── Horizontal Pod Autoscaler ─────────────────────────────────────────────────
+
+autoscaling:
+  enabled: false
+  # Enable in prod values. Keep disabled in dev — saves cost,
+  # avoids surprising scale-downs during low-traffic periods.
+  minReplicas: 2
+  maxReplicas: 10
+  # targetCPUUtilizationPercentage: 70 means HPA scales up when average
+  # CPU across all pods exceeds 70% of their requests.
+  # 70% leaves headroom for request spikes before the next pod is ready.
+  targetCPUUtilizationPercentage: 70
+  # Memory-based scaling — useful for memory-bound services.
+  # Comment out if not applicable.
+  targetMemoryUtilizationPercentage: 80
+  # Scaling behaviour: how fast to scale up vs down.
+  behavior:
+    scaleUp:
+      # Scale up quickly — one pod per 15s, up to 4 pods per minute.
+      # Don't make users wait for capacity during traffic spikes.
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+    scaleDown:
+      # Scale down slowly — wait 5 minutes of sustained low load.
+      # Prevents thrashing: scale down → spike → scale up → repeat.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60
+
+# ── Pod Disruption Budget ─────────────────────────────────────────────────────
+
+podDisruptionBudget:
+  enabled: true
+  # minAvailable: at least this many pods must be running at all times
+  # during voluntary disruptions (node drain, cluster upgrade).
+  # For 2 replicas: minAvailable=1 allows draining one node at a time.
+  # For 3+ replicas: minAvailable=2 is safer.
+  minAvailable: 1
+  # Alternatively use maxUnavailable instead of minAvailable.
+  # maxUnavailable: 1 means at most 1 pod can be unavailable at once.
+  # For stateless services maxUnavailable is often cleaner.
+  # Uncomment to use instead of minAvailable:
+  # maxUnavailable: 1
+
+# ── Service Account & Workload Identity ───────────────────────────────────────
+
+serviceAccount:
+  create: true
+  name: ""
+  # name: if empty, uses the chart's fullname (recommended).
+  # Set explicitly only if reusing an existing SA across releases.
+  annotations:
+    # Workload Identity annotation: links this Kubernetes SA to a GCP SA.
+    # The GCP SA holds the actual GCP IAM permissions (GCS, Pub/Sub, etc.).
+    # Format: GCP_SA_NAME@PROJECT_ID.iam.gserviceaccount.com
+    # Leave empty if the service needs no GCP API access.
+    iam.gke.io/gcp-service-account: ""
+  automountServiceAccountToken: true
+  # automountServiceAccountToken: true is required for Workload Identity
+  # token projection to work. Set false only if the pod needs no K8s API
+  # access AND no GCP API access (rare for real services).
+
+# ── Topology Spread Constraints ───────────────────────────────────────────────
+
+topologySpreadConstraints:
+  # Spread pods across zones to survive a zone failure.
+  # maxSkew: 1 means at most 1 pod difference between any two zones.
+  # A 3-replica service on a 3-zone cluster gets 1 pod per zone.
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+    # DoNotSchedule: strict — pod stays Pending if constraint cannot be met.
+    # ScheduleAnyway: soft — Kubernetes tries but doesn't enforce.
+    # Use DoNotSchedule for production HA. Use ScheduleAnyway for dev
+    # where you might have fewer nodes than replicas.
+    labelSelector:
+      matchLabels: {}
+      # Populated by _helpers.tpl with the pod's selector labels.
+      # Do not set here — set in the template.
+  # Spread across nodes within a zone (defence against node failure).
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    # ScheduleAnyway for hostname spread — this is best-effort.
+    # If you only have 2 nodes and 3 replicas, strict would block scheduling.
+    labelSelector:
+      matchLabels: {}
+
+# ── Network Policy ────────────────────────────────────────────────────────────
+
+networkPolicy:
+  enabled: true
+  # ingress: who can send traffic to this service.
+  ingress:
+    # Allow traffic from pods with the 'ingress-nginx' label
+    # (your ingress controller). Adjust to match your ingress setup.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Allow traffic from pods in the same namespace
+    # (service-to-service calls within the same team's namespace).
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+  # egress: what this service can call outbound.
+  egress:
+    # Allow DNS — required for any outbound call.
+    # Without this, DNS lookups fail silently.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow calls to the Kubernetes API server (for Workload Identity).
+    - ports:
+        - protocol: TCP
+          port: 443
+    # Allow calls to Google APIs (Cloud Storage, Pub/Sub, etc.)
+    # via Private Google Access. The 199.36.153.x ranges are
+    # restricted.googleapis.com — used when PGA is enabled on the subnet.
+    - to:
+        - ipBlock:
+            cidr: 199.36.153.8/30
+      ports:
+        - protocol: TCP
+          port: 443
+    # Allow calls to other services in the same namespace.
+    - to:
+        - podSelector: {}
+
+# ── Pod settings ──────────────────────────────────────────────────────────────
+
+podAnnotations: {}
+# Common annotations to add:
+# prometheus.io/scrape: "true"
+# prometheus.io/port: "8080"
+# prometheus.io/path: "/metrics"
+
+podLabels: {}
+# Additional labels on pods beyond the standard selector labels.
+# Used for cost attribution, team ownership, etc.
+
+podSecurityContext:
+  # Pod-level security context.
+  # runAsNonRoot: prevents running as root (UID 0).
+  runAsNonRoot: true
+  # seccompProfile: restricts syscalls the container can make.
+  # RuntimeDefault uses the container runtime's default seccomp profile.
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  # Container-level security context — more granular than pod-level.
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  # readOnlyRootFilesystem: prevents writing to the container filesystem.
+  # If your app writes temp files, mount an emptyDir volume instead.
+  capabilities:
+    drop:
+      - ALL
+  # Drop all Linux capabilities. Add back only what's needed:
+  # capabilities: { add: ["NET_BIND_SERVICE"] } for port < 1024.
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+
+# ── Health checks ─────────────────────────────────────────────────────────────
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  failureThreshold: 3
+  timeoutSeconds: 5
+  # initialDelaySeconds: wait before first probe.
+  # Set to your app's typical startup time + buffer.
+  # Too low = probe fails before app is ready = unnecessary restart loop.
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  failureThreshold: 3
+  timeoutSeconds: 3
+  # Readiness: pod is only added to Service endpoints when this passes.
+  # Lower initialDelay than liveness — remove from rotation quickly
+  # if not ready, but start checking sooner.
+
+startupProbe:
+  # startupProbe: only runs at startup. Liveness probe is disabled until
+  # startupProbe succeeds. Prevents liveness from killing a slow-starting
+  # pod before it has had a chance to initialise.
+  httpGet:
+    path: /healthz
+    port: 8080
+  failureThreshold: 30
+  periodSeconds: 5
+  # failureThreshold * periodSeconds = max startup time (150s here).
+  # Set to your worst-case startup time under load.
+
+# ── Lifecycle ─────────────────────────────────────────────────────────────────
+
+lifecycle:
+  preStop:
+    exec:
+      # preStop hook: sleep before the container receives SIGTERM.
+      # Gives Kubernetes time to remove the pod from Service endpoints
+      # before the process stops accepting connections.
+      # Without this, in-flight requests during rolling deploy get RST.
+      command: ["/bin/sh", "-c", "sleep 5"]
+
+terminationGracePeriodSeconds: 30
+# Must be > preStop sleep + your app's shutdown time.
+# 30s = 5s preStop + 25s for in-flight request drain.
+
+# ── Environment variables ─────────────────────────────────────────────────────
+
+env: []
+# - name: LOG_LEVEL
+#   value: "info"
+# - name: DB_PASSWORD
+#   valueFrom:
+#     secretKeyRef:
+#       name: my-service-secrets
+#       key: db-password
+
+envFrom: []
+# Load all keys from a ConfigMap or Secret as env vars.
+# - configMapRef:
+#     name: my-service-config
+# - secretRef:
+#     name: my-service-secrets
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
+
+volumes: []
+# - name: tmp
+#   emptyDir: {}
+
+volumeMounts: []
+# - name: tmp
+#   mountPath: /tmp
+# Required if readOnlyRootFilesystem: true and app writes to /tmp.
+
+# ── Node scheduling ───────────────────────────────────────────────────────────
+
+nodeSelector: {}
+# Pin to a specific node pool label.
+# nodeSelector:
+#   pool: general
+
+tolerations: []
+# Tolerate a node pool taint.
+# - key: "cloud.google.com/gke-spot"
+#   operator: "Equal"
+#   value: "true"
+#   effect: "NoSchedule"
+
+affinity: {}
+# Additional affinity rules beyond topologySpreadConstraints.
+# topologySpreadConstraints handles zone/node spreading.
+# Use affinity for co-location rules (run near another service).
+
+# ── Ingress ───────────────────────────────────────────────────────────────────
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts: []
+  # - host: my-service.acme.com
+  #   paths:
+  #     - path: /
+  #       pathType: Prefix
+  tls: []
+
+# ── Full name override ────────────────────────────────────────────────────────
+
+nameOverride: ""
+fullnameOverride: ""
