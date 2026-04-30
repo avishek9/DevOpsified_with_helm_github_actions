@@ -42,9 +42,9 @@ module "vpc" {
   # Internal source ranges = all primary subnet CIDRs in this VPC.
   # VMs tagged 'allow-internal' accept traffic from these ranges.
   # Update this list when adding new subnets.
-  internal_source_ranges = local.all_subnet_cidrs  # europe-west1 primary
-    # Do NOT include secondary ranges here — pod/service traffic
-    # should go through the application layer, not a blanket allow.
+  internal_source_ranges = local.all_subnet_cidrs # europe-west1 primary
+  # Do NOT include secondary ranges here — pod/service traffic
+  # should go through the application layer, not a blanket allow.
 
   enable_deny_all_ingress = true
 

@@ -18,10 +18,10 @@ output "subnets" {
   description = "All subnet details — self_link, CIDR, secondary ranges"
   value = {
     for name, self_link in module.vpc.subnet_self_links : name => {
-      self_link       = self_link
-      ip_cidr_range   = module.vpc.subnet_cidr_ranges[name]
+      self_link        = self_link
+      ip_cidr_range    = module.vpc.subnet_cidr_ranges[name]
       secondary_ranges = module.vpc.subnet_secondary_ranges[name]
-      region          = module.vpc.subnet_regions[name]
+      region           = module.vpc.subnet_regions[name]
     }
   }
 }

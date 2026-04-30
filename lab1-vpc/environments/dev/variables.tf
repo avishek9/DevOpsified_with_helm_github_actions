@@ -31,10 +31,10 @@ variable "subnets" {
       <subnet-name>-services → GKE service CIDR
   EOT
   type = list(object({
-    name            = string
-    region          = string
-    ip_cidr_range   = string
-    description     = optional(string, "")
+    name          = string
+    region        = string
+    ip_cidr_range = string
+    description   = optional(string, "")
     secondary_ranges = optional(list(object({
       range_name    = string
       ip_cidr_range = string
